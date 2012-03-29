@@ -65,11 +65,19 @@ decode(Binary) when is_binary(Binary) ->
 decode(<<>>,Acc,_) ->
   Acc;
 decode(Binary,Acc,Callback) when is_binary(Binary), is_function(Callback)->
-  {Int,Rest} = decode_varint(Binary),
-  Wiretype = Int band 7,
-  Key = Int bsr 3,
-  {Value,Rest2} = extract(Wiretype,Rest),
-  decode(Rest2,Callback(Key,{int_to_wiretype(Wiretype),Value},Acc),Callback).
+    {Int,Rest} = decode_varint(Binary),
+    Wiretype = Int band 7,
+    Key = Int bsr 3,
+    {Value,Rest2} = extract(Wiretype,Rest),
+    case Value of
+        group_start ->
+            {NewAcc, Rest3} = Callback(Key,{int_to_wiretype(Wiretype),Rest2},Acc),
+            decode(Rest3, NewAcc, Callback);
+        group_end ->
+            {group, Acc, Rest2};
+        _ ->
+            decode(Rest2,Callback(Key,{int_to_wiretype(Wiretype),Value},Acc),Callback)
+    end.
 
 % -------------------------------------------------------------
 %% @spec decode_varint(binary()) -> {pos_integer(),binary()}
@@ -189,7 +197,10 @@ encode(Field,bytes,Val) -> encode(Field,length_encoded,Val);
 encode(Field,string,Val) -> encode(Field,length_encoded,Val);
 encode(Field,length_encoded,Val) when is_integer(Field) ->
   Bin = iolist_to_binary(Val),
-  [encode_varint((Field bsl 3) bor 2),encode_varint(byte_size(Bin)),Bin]. 
+  [encode_varint((Field bsl 3) bor 2),encode_varint(byte_size(Bin)),Bin];
+encode(Field, group, Val) ->
+    Bin = iolist_to_binary(Val),
+    [encode_varint((Field bsl 3) bor 3), Bin, encode_varint((Field bsl 3) bor 4)].
 
 %% @hidden
 encode_varint(I) when I < 0 ->
@@ -231,6 +242,10 @@ extract(2,Binary) when is_binary(Binary) ->
          error({not_enough_data,io_lib:format("Size is ~p, Requested is ~p of ~p ~n", [size(Raw),Len, Binary])})
 
     end;
+extract(3, Binary) when is_binary(Binary) ->
+    {group_start, Binary};
+extract(4, Binary) when is_binary(Binary) ->
+    {group_end, Binary};
 extract(5,<<Val:4/binary,Rest/binary>>) ->
     {Val,Rest}.
 
@@ -305,10 +320,13 @@ to_sint(Int) when is_integer(Int) ->
 int_to_wiretype(0) -> varint;
 int_to_wiretype(1) -> fixed64;
 int_to_wiretype(2) -> length_encoded;
-%% int_to_wiretype(3) -> group_start;
-%% int_to_wiretype(4) -> group_end;
+int_to_wiretype(3) -> group_start;
+int_to_wiretype(4) -> group_end;
 int_to_wiretype(5) -> fixed32.
 
 % not the most efficient, but does the expected thing of returning all fields in order without requiring the end user to reverse()
-array_translator(Key,{WireType,Value},Acc) ->
-  Acc ++ [{Key,{WireType,Value}}].
+array_translator(Key, {group_start, Binary}, Acc) ->
+    {group, Group, Rest} = decode(Binary),
+    {Acc ++ [{Key, {group, Group}}], Rest};
+array_translator(Key, {WireType, Value}, Acc) ->
+    Acc ++ [{Key, {WireType, Value}}].
